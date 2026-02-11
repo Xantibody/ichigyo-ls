@@ -5,7 +5,7 @@ use serde::Deserialize;
 /// textlint を実行して結果を返すトレイト。テスト時にモック可能。
 #[async_trait::async_trait]
 pub trait TextlintRunner: Send + Sync + 'static {
-    async fn run(&self, file_path: &Path) -> anyhow::Result<Vec<TextlintResult>>;
+    async fn run(&self, file_path: &Path, work_dir: &Path) -> anyhow::Result<Vec<TextlintResult>>;
 }
 
 /// 実際に textlint コマンドを呼び出す実装。
@@ -13,10 +13,11 @@ pub struct CommandRunner;
 
 #[async_trait::async_trait]
 impl TextlintRunner for CommandRunner {
-    async fn run(&self, file_path: &Path) -> anyhow::Result<Vec<TextlintResult>> {
+    async fn run(&self, file_path: &Path, work_dir: &Path) -> anyhow::Result<Vec<TextlintResult>> {
         let output = tokio::process::Command::new("textlint")
             .args(["--format", "json"])
             .arg(file_path)
+            .current_dir(work_dir)
             .output()
             .await?;
 

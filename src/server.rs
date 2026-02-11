@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use dashmap::DashMap;
 use tower_lsp::jsonrpc::Result;
@@ -10,6 +12,7 @@ use crate::textlint::{self, TextlintMessage, TextlintRunner};
 pub struct Backend<R: TextlintRunner> {
     client: Client,
     runner: R,
+    root_dir: OnceLock<PathBuf>,
     /// URI → (ファイル内容, Vec<TextlintMessage>) を保持。
     /// code_action で fix 情報を参照するために使う。
     state: DashMap<Url, (String, Vec<TextlintMessage>)>,
@@ -20,6 +23,7 @@ impl<R: TextlintRunner> Backend<R> {
         Self {
             client,
             runner,
+            root_dir: OnceLock::new(),
             state: DashMap::new(),
         }
     }
@@ -30,7 +34,15 @@ impl<R: TextlintRunner> Backend<R> {
             Err(()) => return,
         };
 
-        let results = match self.runner.run(&path).await {
+        let work_dir = match self.root_dir.get() {
+            Some(d) => d.clone(),
+            None => match path.parent() {
+                Some(p) => p.to_path_buf(),
+                None => return,
+            },
+        };
+
+        let results = match self.runner.run(&path, &work_dir).await {
             Ok(r) => r,
             Err(_) => return,
         };
@@ -68,7 +80,13 @@ impl<R: TextlintRunner> Backend<R> {
 
 #[tower_lsp::async_trait]
 impl<R: TextlintRunner> LanguageServer for Backend<R> {
-    async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
+    async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        if let Some(root_uri) = params.root_uri {
+            if let Ok(path) = root_uri.to_file_path() {
+                let _ = self.root_dir.set(path);
+            }
+        }
+
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
@@ -182,7 +200,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TextlintRunner for MockRunner {
-        async fn run(&self, _file_path: &Path) -> anyhow::Result<Vec<TextlintResult>> {
+        async fn run(
+            &self,
+            _file_path: &Path,
+            _work_dir: &Path,
+        ) -> anyhow::Result<Vec<TextlintResult>> {
             let results = self.results.lock().unwrap().clone();
             Ok(results)
         }
