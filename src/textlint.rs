@@ -1,5 +1,36 @@
 use serde::Deserialize;
 
+/// LSP の Position 相当。line / character ともに 0-based。
+/// character は UTF-16 コードユニット単位。
+#[derive(Debug, PartialEq)]
+pub struct Position {
+    pub line: u32,
+    pub character: u32,
+}
+
+/// UTF-8 バイトオフセットを LSP Position (line, character) に変換する。
+/// character は UTF-16 コードユニット数。
+pub fn byte_offset_to_position(text: &str, offset: usize) -> Position {
+    let mut line = 0u32;
+    let mut line_start_byte = 0usize;
+
+    for (i, b) in text.as_bytes().iter().enumerate() {
+        if i == offset {
+            break;
+        }
+        if *b == b'\n' {
+            line += 1;
+            line_start_byte = i + 1;
+        }
+    }
+
+    // 現在行の先頭から offset までの UTF-16 コードユニット数を算出
+    let line_slice = &text[line_start_byte..offset];
+    let character = line_slice.chars().map(|c| c.len_utf16() as u32).sum();
+
+    Position { line, character }
+}
+
 #[derive(Debug, Deserialize, PartialEq)]
 pub struct TextlintResult {
     #[serde(rename = "filePath")]
@@ -150,5 +181,73 @@ mod tests {
         let results: Vec<TextlintResult> = serde_json::from_str(json).unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].messages.is_empty());
+    }
+
+    #[test]
+    fn byte_offset_to_position_ascii_single_line() {
+        let text = "hello world";
+        // offset 6 = 'w' → line 0, character 6
+        let pos = byte_offset_to_position(text, 6);
+        assert_eq!(pos.line, 0);
+        assert_eq!(pos.character, 6);
+    }
+
+    #[test]
+    fn byte_offset_to_position_ascii_multi_line() {
+        let text = "hello\nworld\nfoo";
+        // offset 6 = 'w' (2行目先頭) → line 1, character 0
+        let pos = byte_offset_to_position(text, 6);
+        assert_eq!(pos.line, 1);
+        assert_eq!(pos.character, 0);
+
+        // offset 11 = '\n' (2行目末尾) → line 1, character 5
+        let pos = byte_offset_to_position(text, 11);
+        assert_eq!(pos.line, 1);
+        assert_eq!(pos.character, 5);
+
+        // offset 12 = 'f' (3行目先頭) → line 2, character 0
+        let pos = byte_offset_to_position(text, 12);
+        assert_eq!(pos.line, 2);
+        assert_eq!(pos.character, 0);
+    }
+
+    #[test]
+    fn byte_offset_to_position_japanese() {
+        // 'あ' = 3 bytes UTF-8, 1 code unit UTF-16
+        let text = "あいう";
+        // offset 0 = 'あ' → line 0, character 0
+        let pos = byte_offset_to_position(text, 0);
+        assert_eq!(pos.line, 0);
+        assert_eq!(pos.character, 0);
+
+        // offset 3 = 'い' → line 0, character 1
+        let pos = byte_offset_to_position(text, 3);
+        assert_eq!(pos.line, 0);
+        assert_eq!(pos.character, 1);
+
+        // offset 6 = 'う' → line 0, character 2
+        let pos = byte_offset_to_position(text, 6);
+        assert_eq!(pos.line, 0);
+        assert_eq!(pos.character, 2);
+    }
+
+    #[test]
+    fn byte_offset_to_position_surrogate_pair() {
+        // '𠮷' (U+20BB7) = 4 bytes UTF-8, 2 code units UTF-16
+        let text = "a𠮷b";
+        // offset 0 = 'a' → line 0, character 0
+        let pos = byte_offset_to_position(text, 0);
+        assert_eq!(pos.line, 0);
+        assert_eq!(pos.character, 0);
+
+        // offset 1 = '𠮷' → line 0, character 1
+        let pos = byte_offset_to_position(text, 1);
+        assert_eq!(pos.line, 0);
+        assert_eq!(pos.character, 1);
+
+        // offset 5 = 'b' → line 0, character 3 (𠮷 は UTF-16 で 2 code units)
+        let pos = byte_offset_to_position(text, 5);
+        assert_eq!(pos.line, 0);
+        assert_eq!(pos.character, 3);
     }
 }
