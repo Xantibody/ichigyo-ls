@@ -1,4 +1,34 @@
+use std::path::Path;
+
 use serde::Deserialize;
+
+/// textlint を実行して結果を返すトレイト。テスト時にモック可能。
+#[async_trait::async_trait]
+pub trait TextlintRunner: Send + Sync + 'static {
+    async fn run(&self, file_path: &Path) -> anyhow::Result<Vec<TextlintResult>>;
+}
+
+/// 実際に textlint コマンドを呼び出す実装。
+pub struct CommandRunner;
+
+#[async_trait::async_trait]
+impl TextlintRunner for CommandRunner {
+    async fn run(&self, file_path: &Path) -> anyhow::Result<Vec<TextlintResult>> {
+        let output = tokio::process::Command::new("textlint")
+            .args(["--format", "json"])
+            .arg(file_path)
+            .output()
+            .await?;
+
+        // textlint は lint エラーがあると exit code 1 を返すが、stdout に JSON が出る
+        let stdout = String::from_utf8(output.stdout)?;
+        if stdout.is_empty() {
+            return Ok(vec![]);
+        }
+        let results: Vec<TextlintResult> = serde_json::from_str(&stdout)?;
+        Ok(results)
+    }
+}
 
 /// LSP の Position 相当。line / character ともに 0-based。
 /// character は UTF-16 コードユニット単位。
@@ -31,14 +61,14 @@ pub fn byte_offset_to_position(text: &str, offset: usize) -> Position {
     Position { line, character }
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct TextlintResult {
     #[serde(rename = "filePath")]
     pub file_path: String,
     pub messages: Vec<TextlintMessage>,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct TextlintMessage {
     #[serde(rename = "ruleId")]
     pub rule_id: String,
@@ -49,7 +79,7 @@ pub struct TextlintMessage {
     pub fix: Option<FixCommand>,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct FixCommand {
     pub range: [usize; 2],
     pub text: String,
@@ -171,7 +201,10 @@ mod tests {
         assert_eq!(results[1].messages.len(), 1);
         assert!(results[0].messages[0].fix.is_some());
         assert!(results[0].messages[1].fix.is_none());
-        assert_eq!(results[1].messages[0].fix.as_ref().unwrap().range, [100, 110]);
+        assert_eq!(
+            results[1].messages[0].fix.as_ref().unwrap().range,
+            [100, 110]
+        );
     }
 
     #[test]
