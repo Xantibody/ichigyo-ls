@@ -40,7 +40,7 @@ textlint を `--format json` で実行すると以下の構造が得られる:
 
 重要なポイント:
 - `line` / `column` は 1-based
-- `fix.range` は 0-based のバイトオフセット（UTF-8）
+- `fix.range` は 0-based の文字オフセット（JavaScript 文字列インデックス = UTF-16 コードユニット）
 - `fix` フィールドはオプショナル（fix 不可能なルールでは存在しない）
 - `severity`: `1` = warning, `2` = error
 
@@ -121,22 +121,23 @@ textDocument/codeAction リクエスト受信
   → diagnostics_map から該当ファイルの messages を取得
   → リクエストの range と重なる Diagnostic を絞り込み
   → fix フィールドを持つ message に対して:
-    → fix.range (バイトオフセット) を Position (line, character) に変換
+    → fix.range (UTF-16 オフセット) を Position (line, character) に変換
     → WorkspaceEdit を構築
     → CodeAction { kind: QuickFix, edit: WorkspaceEdit } を返す
 ```
 
-### バイトオフセット → Position 変換
+### UTF-16 オフセット → Position 変換
 
-textlint の `fix.range` は UTF-8 バイトオフセットだが、LSP の Position は `(line, character)` で character は UTF-16 オフセット。
+textlint の `fix.range` は JavaScript 文字列インデックス（UTF-16 コードユニット単位）。
+LSP の Position も `character` が UTF-16 コードユニット単位なので、行内オフセットはそのまま使える。
 
 変換ロジック:
 
 ```
-fn byte_offset_to_position(text: &str, offset: usize) -> Position:
-  1. text を先頭から offset バイトまで走査
-  2. 改行文字をカウントして line を決定
-  3. 現在行の先頭からの UTF-16 コードユニット数を character として算出
+fn utf16_offset_to_position(text: &str, offset: usize) -> Position:
+  1. text を先頭から UTF-16 コードユニットを数えながら走査
+  2. 改行文字で line をインクリメントし、行頭の UTF-16 オフセットを記録
+  3. offset に到達したら、行頭からの差分を character とする
   4. Position { line, character } を返す
 ```
 

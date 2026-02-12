@@ -142,8 +142,8 @@ impl<R: TextlintRunner> LanguageServer for Backend<R> {
                 continue;
             }
 
-            let start = textlint::byte_offset_to_position(text, fix.range[0]);
-            let end = textlint::byte_offset_to_position(text, fix.range[1]);
+            let start = textlint::utf16_offset_to_position(text, fix.range[0]);
+            let end = textlint::utf16_offset_to_position(text, fix.range[1]);
 
             let edit_range = Range {
                 start: Position::new(start.line, start.character),
@@ -233,7 +233,7 @@ mod tests {
                 column: 5,
                 severity: 2,
                 fix: Some(FixCommand {
-                    range: [8, 11],
+                    range: [6, 7],
                     text: "けれど".to_string(),
                 }),
             }],
@@ -257,7 +257,7 @@ mod tests {
                     column: 5,
                     severity: 2,
                     fix: Some(FixCommand {
-                        range: [8, 11],
+                        range: [6, 7],
                         text: "けれど".to_string(),
                     }),
                 }],

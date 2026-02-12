@@ -39,26 +39,27 @@ pub struct Position {
     pub character: u32,
 }
 
-/// UTF-8 バイトオフセットを LSP Position (line, character) に変換する。
-/// character は UTF-16 コードユニット数。
-pub fn byte_offset_to_position(text: &str, offset: usize) -> Position {
+/// textlint の文字オフセット（JavaScript 文字列インデックス = UTF-16 コードユニット）
+/// を LSP Position (line, character) に変換する。
+/// LSP の character も UTF-16 コードユニット単位なので、行内のオフセットはそのまま使える。
+pub fn utf16_offset_to_position(text: &str, offset: usize) -> Position {
     let mut line = 0u32;
-    let mut line_start_byte = 0usize;
+    let mut utf16_count = 0usize;
+    let mut line_start_utf16 = 0usize;
 
-    for (i, b) in text.as_bytes().iter().enumerate() {
-        if i == offset {
+    for ch in text.chars() {
+        if utf16_count == offset {
             break;
         }
-        if *b == b'\n' {
+        let units = ch.len_utf16();
+        if ch == '\n' {
             line += 1;
-            line_start_byte = i + 1;
+            line_start_utf16 = utf16_count + units;
         }
+        utf16_count += units;
     }
 
-    // 現在行の先頭から offset までの UTF-16 コードユニット数を算出
-    let line_slice = &text[line_start_byte..offset];
-    let character = line_slice.chars().map(|c| c.len_utf16() as u32).sum();
-
+    let character = (offset - line_start_utf16) as u32;
     Position { line, character }
 }
 
@@ -218,69 +219,84 @@ mod tests {
     }
 
     #[test]
-    fn byte_offset_to_position_ascii_single_line() {
+    fn utf16_offset_to_position_ascii_single_line() {
         let text = "hello world";
         // offset 6 = 'w' → line 0, character 6
-        let pos = byte_offset_to_position(text, 6);
+        let pos = utf16_offset_to_position(text, 6);
         assert_eq!(pos.line, 0);
         assert_eq!(pos.character, 6);
     }
 
     #[test]
-    fn byte_offset_to_position_ascii_multi_line() {
+    fn utf16_offset_to_position_ascii_multi_line() {
         let text = "hello\nworld\nfoo";
         // offset 6 = 'w' (2行目先頭) → line 1, character 0
-        let pos = byte_offset_to_position(text, 6);
+        let pos = utf16_offset_to_position(text, 6);
         assert_eq!(pos.line, 1);
         assert_eq!(pos.character, 0);
 
         // offset 11 = '\n' (2行目末尾) → line 1, character 5
-        let pos = byte_offset_to_position(text, 11);
+        let pos = utf16_offset_to_position(text, 11);
         assert_eq!(pos.line, 1);
         assert_eq!(pos.character, 5);
 
         // offset 12 = 'f' (3行目先頭) → line 2, character 0
-        let pos = byte_offset_to_position(text, 12);
+        let pos = utf16_offset_to_position(text, 12);
         assert_eq!(pos.line, 2);
         assert_eq!(pos.character, 0);
     }
 
     #[test]
-    fn byte_offset_to_position_japanese() {
-        // 'あ' = 3 bytes UTF-8, 1 code unit UTF-16
+    fn utf16_offset_to_position_japanese() {
+        // 'あ' = 3 bytes UTF-8, 1 UTF-16 code unit
         let text = "あいう";
-        // offset 0 = 'あ' → line 0, character 0
-        let pos = byte_offset_to_position(text, 0);
+        // UTF-16 offset 0 = 'あ' → line 0, character 0
+        let pos = utf16_offset_to_position(text, 0);
         assert_eq!(pos.line, 0);
         assert_eq!(pos.character, 0);
 
-        // offset 3 = 'い' → line 0, character 1
-        let pos = byte_offset_to_position(text, 3);
+        // UTF-16 offset 1 = 'い' → line 0, character 1
+        let pos = utf16_offset_to_position(text, 1);
         assert_eq!(pos.line, 0);
         assert_eq!(pos.character, 1);
 
-        // offset 6 = 'う' → line 0, character 2
-        let pos = byte_offset_to_position(text, 6);
+        // UTF-16 offset 2 = 'う' → line 0, character 2
+        let pos = utf16_offset_to_position(text, 2);
         assert_eq!(pos.line, 0);
         assert_eq!(pos.character, 2);
     }
 
     #[test]
-    fn byte_offset_to_position_surrogate_pair() {
-        // '𠮷' (U+20BB7) = 4 bytes UTF-8, 2 code units UTF-16
+    fn utf16_offset_to_position_japanese_multi_line() {
+        // "あいう\nかきく" — 各文字 UTF-16 で 1 code unit
+        let text = "あいう\nかきく";
+        // UTF-16 offset 4 = 'か' (2行目先頭, '\n'の次) → line 1, character 0
+        let pos = utf16_offset_to_position(text, 4);
+        assert_eq!(pos.line, 1);
+        assert_eq!(pos.character, 0);
+
+        // UTF-16 offset 5 = 'き' → line 1, character 1
+        let pos = utf16_offset_to_position(text, 5);
+        assert_eq!(pos.line, 1);
+        assert_eq!(pos.character, 1);
+    }
+
+    #[test]
+    fn utf16_offset_to_position_surrogate_pair() {
+        // '𠮷' (U+20BB7) = 4 bytes UTF-8, 2 UTF-16 code units
         let text = "a𠮷b";
-        // offset 0 = 'a' → line 0, character 0
-        let pos = byte_offset_to_position(text, 0);
+        // UTF-16 offset 0 = 'a' → line 0, character 0
+        let pos = utf16_offset_to_position(text, 0);
         assert_eq!(pos.line, 0);
         assert_eq!(pos.character, 0);
 
-        // offset 1 = '𠮷' → line 0, character 1
-        let pos = byte_offset_to_position(text, 1);
+        // UTF-16 offset 1 = '𠮷' → line 0, character 1
+        let pos = utf16_offset_to_position(text, 1);
         assert_eq!(pos.line, 0);
         assert_eq!(pos.character, 1);
 
-        // offset 5 = 'b' → line 0, character 3 (𠮷 は UTF-16 で 2 code units)
-        let pos = byte_offset_to_position(text, 5);
+        // UTF-16 offset 3 = 'b' (𠮷 は 2 code units) → line 0, character 3
+        let pos = utf16_offset_to_position(text, 3);
         assert_eq!(pos.line, 0);
         assert_eq!(pos.character, 3);
     }
