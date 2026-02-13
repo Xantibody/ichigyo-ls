@@ -7,15 +7,41 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
-use crate::textlint::{self, TextlintMessage, TextlintRunner};
+use crate::textlint::{self, PositionEncoding, TextlintMessage, TextlintRunner};
 
 pub struct Backend<R: TextlintRunner> {
     client: Client,
     runner: R,
     root_dir: OnceLock<PathBuf>,
+    position_encoding: OnceLock<PositionEncoding>,
     /// URI → (ファイル内容, Vec<TextlintMessage>) を保持。
     /// code_action で fix 情報を参照するために使う。
     state: DashMap<Url, (String, Vec<TextlintMessage>)>,
+}
+
+fn negotiate_encoding(params: &InitializeParams) -> (PositionEncoding, PositionEncodingKind) {
+    if let Some(ref general) = params.capabilities.general {
+        if let Some(ref encodings) = general.position_encodings {
+            // UTF-16 が LSP デフォルト。クライアントがサポートしていれば優先する。
+            for enc in encodings {
+                if *enc == PositionEncodingKind::UTF16 {
+                    return (PositionEncoding::Utf16, PositionEncodingKind::UTF16);
+                }
+            }
+            for enc in encodings {
+                if *enc == PositionEncodingKind::UTF32 {
+                    return (PositionEncoding::Utf32, PositionEncodingKind::UTF32);
+                }
+            }
+            for enc in encodings {
+                if *enc == PositionEncodingKind::UTF8 {
+                    return (PositionEncoding::Utf8, PositionEncodingKind::UTF8);
+                }
+            }
+        }
+    }
+    // デフォルト: UTF-16 (LSP 仕様)
+    (PositionEncoding::Utf16, PositionEncodingKind::UTF16)
 }
 
 impl<R: TextlintRunner> Backend<R> {
@@ -24,8 +50,13 @@ impl<R: TextlintRunner> Backend<R> {
             client,
             runner,
             root_dir: OnceLock::new(),
+            position_encoding: OnceLock::new(),
             state: DashMap::new(),
         }
+    }
+
+    fn encoding(&self) -> PositionEncoding {
+        self.position_encoding.get().copied().unwrap_or_default()
     }
 
     async fn lint_and_publish(&self, uri: &Url, text: &str) {
@@ -48,12 +79,13 @@ impl<R: TextlintRunner> Backend<R> {
         };
 
         let messages: Vec<TextlintMessage> = results.into_iter().flat_map(|r| r.messages).collect();
+        let encoding = self.encoding();
 
         let diagnostics: Vec<Diagnostic> = messages
             .iter()
             .map(|msg| {
                 let line = msg.line.saturating_sub(1);
-                let col = msg.column.saturating_sub(1);
+                let col = textlint::textlint_column_to_character(text, line, msg.column, encoding);
                 Diagnostic {
                     range: Range {
                         start: Position::new(line, col),
@@ -81,6 +113,9 @@ impl<R: TextlintRunner> Backend<R> {
 #[tower_lsp::async_trait]
 impl<R: TextlintRunner> LanguageServer for Backend<R> {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        let (encoding, encoding_kind) = negotiate_encoding(&params);
+        let _ = self.position_encoding.set(encoding);
+
         if let Some(root_uri) = params.root_uri {
             if let Ok(path) = root_uri.to_file_path() {
                 let _ = self.root_dir.set(path);
@@ -93,6 +128,7 @@ impl<R: TextlintRunner> LanguageServer for Backend<R> {
                     TextDocumentSyncKind::FULL,
                 )),
                 code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+                position_encoding: Some(encoding_kind),
                 ..Default::default()
             },
             ..Default::default()
@@ -153,8 +189,9 @@ impl<R: TextlintRunner> LanguageServer for Backend<R> {
                 continue;
             }
 
-            let start = textlint::utf16_offset_to_position(text, fix.range[0]);
-            let end = textlint::utf16_offset_to_position(text, fix.range[1]);
+            let encoding = self.encoding();
+            let start = textlint::offset_to_position(text, fix.range[0], encoding);
+            let end = textlint::offset_to_position(text, fix.range[1], encoding);
 
             let edit_range = Range {
                 start: Position::new(start.line, start.character),

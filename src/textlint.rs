@@ -31,36 +31,109 @@ impl TextlintRunner for CommandRunner {
     }
 }
 
+/// LSP の Position.character で使うエンコーディング。
+/// クライアントとの negotiation 結果に基づいて選択する。
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum PositionEncoding {
+    Utf8,
+    #[default]
+    Utf16,
+    Utf32,
+}
+
 /// LSP の Position 相当。line / character ともに 0-based。
-/// character は UTF-16 コードユニット単位。
 #[derive(Debug, PartialEq)]
 pub struct Position {
     pub line: u32,
     pub character: u32,
 }
 
-/// textlint の文字オフセット（JavaScript 文字列インデックス = UTF-16 コードユニット）
-/// を LSP Position (line, character) に変換する。
-/// LSP の character も UTF-16 コードユニット単位なので、行内のオフセットはそのまま使える。
-pub fn utf16_offset_to_position(text: &str, offset: usize) -> Position {
+/// textlint の文字オフセット（UTF-16 コードユニット単位）を
+/// 指定されたエンコーディングの Position に変換する。
+pub fn offset_to_position(text: &str, offset: usize, encoding: PositionEncoding) -> Position {
     let mut line = 0u32;
     let mut utf16_count = 0usize;
     let mut line_start_utf16 = 0usize;
+    let mut line_start_byte = 0usize;
+    let mut line_start_chars = 0usize;
+    let mut byte_count = 0usize;
+    let mut char_count = 0usize;
 
     for ch in text.chars() {
         if utf16_count == offset {
             break;
         }
-        let units = ch.len_utf16();
+        let utf16_len = ch.len_utf16();
+        let utf8_len = ch.len_utf8();
         if ch == '\n' {
             line += 1;
-            line_start_utf16 = utf16_count + units;
+            line_start_utf16 = utf16_count + utf16_len;
+            line_start_byte = byte_count + utf8_len;
+            line_start_chars = char_count + 1;
         }
-        utf16_count += units;
+        utf16_count += utf16_len;
+        byte_count += utf8_len;
+        char_count += 1;
     }
 
-    let character = (offset - line_start_utf16) as u32;
+    let character = match encoding {
+        PositionEncoding::Utf8 => (byte_count - line_start_byte) as u32,
+        PositionEncoding::Utf16 => (utf16_count - line_start_utf16) as u32,
+        PositionEncoding::Utf32 => (char_count - line_start_chars) as u32,
+    };
+
     Position { line, character }
+}
+
+/// textlint の column (1-based, UTF-16 コードユニット) を
+/// 指定されたエンコーディングの character offset (0-based) に変換する。
+pub fn textlint_column_to_character(
+    text: &str,
+    line_0based: u32,
+    column_1based: u32,
+    encoding: PositionEncoding,
+) -> u32 {
+    if encoding == PositionEncoding::Utf16 {
+        return column_1based.saturating_sub(1);
+    }
+
+    // 対象行の先頭バイトインデックスを探す
+    let line_start_byte = if line_0based == 0 {
+        0
+    } else {
+        let mut remaining = line_0based;
+        text.char_indices()
+            .find_map(|(i, ch)| {
+                if ch == '\n' {
+                    remaining -= 1;
+                    if remaining == 0 {
+                        return Some(i + ch.len_utf8());
+                    }
+                }
+                None
+            })
+            .unwrap_or(text.len())
+    };
+
+    // 行先頭から column_1based - 1 個の UTF-16 code units を歩いて
+    // 指定エンコーディングでのオフセットを計算する
+    let target_utf16 = column_1based.saturating_sub(1) as usize;
+    let mut utf16_walked = 0usize;
+    let mut result = 0u32;
+
+    for ch in text[line_start_byte..].chars() {
+        if utf16_walked >= target_utf16 || ch == '\n' {
+            break;
+        }
+        match encoding {
+            PositionEncoding::Utf8 => result += ch.len_utf8() as u32,
+            PositionEncoding::Utf32 => result += 1,
+            PositionEncoding::Utf16 => unreachable!(),
+        }
+        utf16_walked += ch.len_utf16();
+    }
+
+    result
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -219,102 +292,151 @@ mod tests {
     }
 
     #[test]
-    fn utf16_offset_to_position_ascii_single_line() {
+    fn offset_to_position_ascii_single_line() {
         let text = "hello world";
-        // offset 6 = 'w' → line 0, character 6
-        let pos = utf16_offset_to_position(text, 6);
+        // offset 6 = 'w' → line 0, character 6 (同じ for all encodings)
+        for enc in [
+            PositionEncoding::Utf8,
+            PositionEncoding::Utf16,
+            PositionEncoding::Utf32,
+        ] {
+            let pos = offset_to_position(text, 6, enc);
+            assert_eq!(pos.line, 0);
+            assert_eq!(pos.character, 6);
+        }
+    }
+
+    #[test]
+    fn offset_to_position_ascii_multi_line() {
+        let text = "hello\nworld\nfoo";
+        // ASCII なので全エンコーディングで同じ結果
+        for enc in [
+            PositionEncoding::Utf8,
+            PositionEncoding::Utf16,
+            PositionEncoding::Utf32,
+        ] {
+            let pos = offset_to_position(text, 6, enc);
+            assert_eq!(pos.line, 1, "enc={enc:?}");
+            assert_eq!(pos.character, 0, "enc={enc:?}");
+
+            let pos = offset_to_position(text, 11, enc);
+            assert_eq!(pos.line, 1, "enc={enc:?}");
+            assert_eq!(pos.character, 5, "enc={enc:?}");
+
+            let pos = offset_to_position(text, 12, enc);
+            assert_eq!(pos.line, 2, "enc={enc:?}");
+            assert_eq!(pos.character, 0, "enc={enc:?}");
+        }
+    }
+
+    #[test]
+    fn offset_to_position_japanese_utf16() {
+        let text = "あいう";
+        let pos = offset_to_position(text, 1, PositionEncoding::Utf16);
+        assert_eq!(pos.line, 0);
+        assert_eq!(pos.character, 1);
+    }
+
+    #[test]
+    fn offset_to_position_japanese_utf8() {
+        // 'あ' = 3 bytes UTF-8
+        let text = "あいう";
+        // offset 1 (UTF-16) = 'い' → UTF-8 byte offset from line start = 3
+        let pos = offset_to_position(text, 1, PositionEncoding::Utf8);
+        assert_eq!(pos.line, 0);
+        assert_eq!(pos.character, 3);
+
+        // offset 2 (UTF-16) = 'う' → UTF-8 byte offset = 6
+        let pos = offset_to_position(text, 2, PositionEncoding::Utf8);
         assert_eq!(pos.line, 0);
         assert_eq!(pos.character, 6);
     }
 
     #[test]
-    fn utf16_offset_to_position_ascii_multi_line() {
-        let text = "hello\nworld\nfoo";
-        // offset 6 = 'w' (2行目先頭) → line 1, character 0
-        let pos = utf16_offset_to_position(text, 6);
-        assert_eq!(pos.line, 1);
-        assert_eq!(pos.character, 0);
-
-        // offset 11 = '\n' (2行目末尾) → line 1, character 5
-        let pos = utf16_offset_to_position(text, 11);
-        assert_eq!(pos.line, 1);
-        assert_eq!(pos.character, 5);
-
-        // offset 12 = 'f' (3行目先頭) → line 2, character 0
-        let pos = utf16_offset_to_position(text, 12);
-        assert_eq!(pos.line, 2);
-        assert_eq!(pos.character, 0);
-    }
-
-    #[test]
-    fn utf16_offset_to_position_japanese() {
-        // 'あ' = 3 bytes UTF-8, 1 UTF-16 code unit
+    fn offset_to_position_japanese_utf32() {
         let text = "あいう";
-        // UTF-16 offset 0 = 'あ' → line 0, character 0
-        let pos = utf16_offset_to_position(text, 0);
-        assert_eq!(pos.line, 0);
-        assert_eq!(pos.character, 0);
-
-        // UTF-16 offset 1 = 'い' → line 0, character 1
-        let pos = utf16_offset_to_position(text, 1);
+        // UTF-32 は code point 数 = character 数
+        let pos = offset_to_position(text, 1, PositionEncoding::Utf32);
         assert_eq!(pos.line, 0);
         assert_eq!(pos.character, 1);
-
-        // UTF-16 offset 2 = 'う' → line 0, character 2
-        let pos = utf16_offset_to_position(text, 2);
-        assert_eq!(pos.line, 0);
-        assert_eq!(pos.character, 2);
     }
 
     #[test]
-    fn utf16_offset_to_position_japanese_multi_line() {
-        // "あいう\nかきく" — 各文字 UTF-16 で 1 code unit
+    fn offset_to_position_japanese_multi_line_utf8() {
         let text = "あいう\nかきく";
-        // UTF-16 offset 4 = 'か' (2行目先頭, '\n'の次) → line 1, character 0
-        let pos = utf16_offset_to_position(text, 4);
+        // offset 4 (UTF-16) = 'か' (2行目先頭) → UTF-8: line 1, char 0
+        let pos = offset_to_position(text, 4, PositionEncoding::Utf8);
         assert_eq!(pos.line, 1);
         assert_eq!(pos.character, 0);
 
-        // UTF-16 offset 5 = 'き' → line 1, character 1
-        let pos = utf16_offset_to_position(text, 5);
+        // offset 5 (UTF-16) = 'き' → UTF-8: line 1, char 3
+        let pos = offset_to_position(text, 5, PositionEncoding::Utf8);
         assert_eq!(pos.line, 1);
-        assert_eq!(pos.character, 1);
-    }
-
-    #[test]
-    fn utf16_offset_to_position_surrogate_pair() {
-        // '𠮷' (U+20BB7) = 4 bytes UTF-8, 2 UTF-16 code units
-        let text = "a𠮷b";
-        // UTF-16 offset 0 = 'a' → line 0, character 0
-        let pos = utf16_offset_to_position(text, 0);
-        assert_eq!(pos.line, 0);
-        assert_eq!(pos.character, 0);
-
-        // UTF-16 offset 1 = '𠮷' → line 0, character 1
-        let pos = utf16_offset_to_position(text, 1);
-        assert_eq!(pos.line, 0);
-        assert_eq!(pos.character, 1);
-
-        // UTF-16 offset 3 = 'b' (𠮷 は 2 code units) → line 0, character 3
-        let pos = utf16_offset_to_position(text, 3);
-        assert_eq!(pos.line, 0);
         assert_eq!(pos.character, 3);
     }
 
     #[test]
-    fn utf16_offset_to_position_real_textlint_data() {
-        // textlint 実出力: "ふたつ => 2つ", index:1324, line:70, column:24
-        // fix.range: [1324, 1327]
-        let text = include_str!("../../raizawa-blog/app/posts/2026-02-12_1.md");
+    fn offset_to_position_surrogate_pair() {
+        // '𠮷' (U+20BB7) = 4 bytes UTF-8, 2 UTF-16 code units
+        let text = "a𠮷b";
+        // UTF-16 encoding
+        let pos = offset_to_position(text, 3, PositionEncoding::Utf16);
+        assert_eq!(pos.character, 3); // 'a'(1) + '𠮷'(2) = 3
 
-        // offset 1324 = 'ふ' → line 69 (0-based), character 23 (0-based)
-        let start = utf16_offset_to_position(text, 1324);
-        assert_eq!(start.line, 69);
-        assert_eq!(start.character, 23);
+        // UTF-8 encoding
+        let pos = offset_to_position(text, 3, PositionEncoding::Utf8);
+        assert_eq!(pos.character, 5); // 'a'(1) + '𠮷'(4) = 5
 
-        // offset 1327 = end of 'つ' → line 69, character 26
-        let end = utf16_offset_to_position(text, 1327);
-        assert_eq!(end.line, 69);
-        assert_eq!(end.character, 26);
+        // UTF-32 encoding
+        let pos = offset_to_position(text, 3, PositionEncoding::Utf32);
+        assert_eq!(pos.character, 2); // 'a'(1) + '𠮷'(1) = 2
+    }
+
+    #[test]
+    fn textlint_column_to_character_utf16() {
+        let text = "あいう";
+        // column 2 (1-based) → character 1 (0-based) in UTF-16
+        assert_eq!(
+            textlint_column_to_character(text, 0, 2, PositionEncoding::Utf16),
+            1
+        );
+    }
+
+    #[test]
+    fn textlint_column_to_character_utf8() {
+        let text = "あいう";
+        // column 2 (1-based) → 'い' is at byte offset 3
+        assert_eq!(
+            textlint_column_to_character(text, 0, 2, PositionEncoding::Utf8),
+            3
+        );
+    }
+
+    #[test]
+    fn textlint_column_to_character_utf32() {
+        let text = "あいう";
+        // column 2 (1-based) → code point 1
+        assert_eq!(
+            textlint_column_to_character(text, 0, 2, PositionEncoding::Utf32),
+            1
+        );
+    }
+
+    #[test]
+    fn textlint_column_to_character_second_line() {
+        let text = "abc\nあいう";
+        // line 1, column 2 (1-based) → 'い'
+        assert_eq!(
+            textlint_column_to_character(text, 1, 2, PositionEncoding::Utf8),
+            3
+        );
+        assert_eq!(
+            textlint_column_to_character(text, 1, 2, PositionEncoding::Utf16),
+            1
+        );
+        assert_eq!(
+            textlint_column_to_character(text, 1, 2, PositionEncoding::Utf32),
+            1
+        );
     }
 }

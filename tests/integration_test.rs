@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use ichigyo_ls::textlint::{self, CommandRunner, TextlintRunner};
+use ichigyo_ls::textlint::{self, CommandRunner, PositionEncoding, TextlintRunner};
 
 const FIXTURE: &str = include_str!("fixtures/sample.md");
 
@@ -58,8 +58,8 @@ async fn fix_range_converts_to_correct_position() {
         .unwrap();
     let fix = futatsu.fix.as_ref().unwrap();
 
-    let start = textlint::utf16_offset_to_position(FIXTURE, fix.range[0]);
-    let end = textlint::utf16_offset_to_position(FIXTURE, fix.range[1]);
+    let start = textlint::offset_to_position(FIXTURE, fix.range[0], PositionEncoding::Utf16);
+    let end = textlint::offset_to_position(FIXTURE, fix.range[1], PositionEncoding::Utf16);
 
     // textlint は line:3 (1-based) → 0-based で line 2
     assert_eq!(
