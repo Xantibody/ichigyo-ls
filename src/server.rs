@@ -109,15 +109,26 @@ impl<R: TextlintRunner> LanguageServer for Backend<R> {
         self.lint_and_publish(&uri, &text).await;
     }
 
+    async fn did_change(&self, params: DidChangeTextDocumentParams) {
+        let uri = params.text_document.uri;
+        // TextDocumentSyncKind::FULL なので content_changes[0] に全文が入る
+        if let Some(change) = params.content_changes.into_iter().next() {
+            if let Some(mut entry) = self.state.get_mut(&uri) {
+                entry.0 = change.text;
+            }
+        }
+    }
+
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
         let uri = params.text_document.uri;
-        if let Some(text) = params.text {
-            self.lint_and_publish(&uri, &text).await;
+        let text = if let Some(text) = params.text {
+            text
         } else if let Some(entry) = self.state.get(&uri) {
-            let text = entry.0.clone();
-            drop(entry);
-            self.lint_and_publish(&uri, &text).await;
-        }
+            entry.0.clone()
+        } else {
+            return;
+        };
+        self.lint_and_publish(&uri, &text).await;
     }
 
     async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {

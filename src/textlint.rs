@@ -300,4 +300,21 @@ mod tests {
         assert_eq!(pos.line, 0);
         assert_eq!(pos.character, 3);
     }
+
+    #[test]
+    fn utf16_offset_to_position_real_textlint_data() {
+        // textlint 実出力: "ふたつ => 2つ", index:1324, line:70, column:24
+        // fix.range: [1324, 1327]
+        let text = include_str!("../../raizawa-blog/app/posts/2026-02-12_1.md");
+
+        // offset 1324 = 'ふ' → line 69 (0-based), character 23 (0-based)
+        let start = utf16_offset_to_position(text, 1324);
+        assert_eq!(start.line, 69);
+        assert_eq!(start.character, 23);
+
+        // offset 1327 = end of 'つ' → line 69, character 26
+        let end = utf16_offset_to_position(text, 1327);
+        assert_eq!(end.line, 69);
+        assert_eq!(end.character, 26);
+    }
 }
