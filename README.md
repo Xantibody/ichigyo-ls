@@ -63,3 +63,8 @@ cargo clippy
 # フォーマット
 cargo fmt --check
 ```
+
+## Acknowledgements
+
+- [textlint](https://github.com/textlint/textlint) — pluggable natural language linter
+- [efm-langserver](https://github.com/mattn/efm-langserver) — general purpose language server
