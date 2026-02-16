@@ -59,7 +59,7 @@ impl<R: TextlintRunner> Backend<R> {
         self.position_encoding.get().copied().unwrap_or_default()
     }
 
-    async fn lint_and_publish(&self, uri: &Url, text: &str) {
+    async fn lint_and_publish(&self, uri: &Url) {
         let path = match uri.to_file_path() {
             Ok(p) => p,
             Err(()) => return,
@@ -78,6 +78,14 @@ impl<R: TextlintRunner> Backend<R> {
             Err(_) => return,
         };
 
+        // textlint が解析したファイルと同じ内容を読み込む。
+        // バッファテキスト (did_change) ではなくディスクのファイルを使うことで
+        // fix.range オフセットとの整合性を保証する。
+        let text = match tokio::fs::read_to_string(&path).await {
+            Ok(t) => t,
+            Err(_) => return,
+        };
+
         let messages: Vec<TextlintMessage> = results.into_iter().flat_map(|r| r.messages).collect();
         let encoding = self.encoding();
 
@@ -85,7 +93,7 @@ impl<R: TextlintRunner> Backend<R> {
             .iter()
             .map(|msg| {
                 let line = msg.line.saturating_sub(1);
-                let col = textlint::textlint_column_to_character(text, line, msg.column, encoding);
+                let col = textlint::textlint_column_to_character(&text, line, msg.column, encoding);
                 Diagnostic {
                     range: Range {
                         start: Position::new(line, col),
@@ -103,7 +111,7 @@ impl<R: TextlintRunner> Backend<R> {
             })
             .collect();
 
-        self.state.insert(uri.clone(), (text.to_string(), messages));
+        self.state.insert(uri.clone(), (text, messages));
         self.client
             .publish_diagnostics(uri.clone(), diagnostics, None)
             .await;
@@ -141,30 +149,18 @@ impl<R: TextlintRunner> LanguageServer for Backend<R> {
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri;
-        let text = params.text_document.text;
-        self.lint_and_publish(&uri, &text).await;
+        self.lint_and_publish(&uri).await;
     }
 
-    async fn did_change(&self, params: DidChangeTextDocumentParams) {
-        let uri = params.text_document.uri;
-        // TextDocumentSyncKind::FULL なので content_changes[0] に全文が入る
-        if let Some(change) = params.content_changes.into_iter().next() {
-            if let Some(mut entry) = self.state.get_mut(&uri) {
-                entry.0 = change.text;
-            }
-        }
+    async fn did_change(&self, _params: DidChangeTextDocumentParams) {
+        // state のテキストは lint_and_publish でディスクから読むため、
+        // ここでは更新しない。did_change でテキストを上書きすると
+        // textlint の fix.range オフセットとの不整合が発生する。
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
         let uri = params.text_document.uri;
-        let text = if let Some(text) = params.text {
-            text
-        } else if let Some(entry) = self.state.get(&uri) {
-            entry.0.clone()
-        } else {
-            return;
-        };
-        self.lint_and_publish(&uri, &text).await;
+        self.lint_and_publish(&uri).await;
     }
 
     async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
