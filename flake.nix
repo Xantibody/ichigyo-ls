@@ -60,6 +60,18 @@
         };
       in
       {
+        packages.default = pkgs.rustPlatform.buildRustPackage {
+          pname = "ichigyo-ls";
+          version = "0.1.0";
+          src = ./.;
+          cargoLock.lockFile = ./Cargo.lock;
+          # インテグレーションテストは textlint が必要なので Nix ビルドではスキップ
+          doCheck = false;
+          meta = {
+            description = "LSP server wrapping textlint for diagnostics and code actions";
+            mainProgram = "ichigyo-ls";
+          };
+        };
         formatter = treefmtEval.config.build.wrapper;
         checks.formatting = treefmtEval.config.build.check;
         devShells.default = pkgs.mkShell {
